@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Threading;
 using System.Linq;
 using ExcelDna.Integration;
 using System.Runtime.InteropServices;
@@ -98,58 +97,70 @@ namespace Xltrail.Client
                                     repository.Branches.Add(localBranchName, branch.Tip),
                                     b => b.TrackedBranch = branch.CanonicalName);
                             }
-                            LibGit2Sharp.Commands.Checkout(repository, localBranchName);
-                            var signature = new LibGit2Sharp.Signature(UserName, UserName, new DateTimeOffset());
-                            var mergeOptions = new LibGit2Sharp.MergeOptions();
-                            repository.Merge(branch, signature, mergeOptions);
+                            var localBranch = repository.Branches[localBranchName];
+                            if(localBranch.Tip != branch.Tip)
+                            {
+                                LibGit2Sharp.Commands.Checkout(repository, localBranchName);
+                                repository.Reset(LibGit2Sharp.ResetMode.Hard, branch.Tip);
+                            }
                         }
 
                     }
                 }
             }
 
-            public void PullRepositories()
+            public void PullRepository(Models.Config.Workbooks.Repository repository)
+            {
+                var path = Path.Combine(RepositoriesPath, repository.Alias);
+                if (Directory.Exists(path))
+                {
+                    using (var repo = new LibGit2Sharp.Repository(path))
+                    {
+                        foreach (var remote in repo.Network.Remotes)
+                        {
+                            IEnumerable<string> refSpecs = remote.FetchRefSpecs.Select(x => x.Specification);
+                            LibGit2Sharp.Commands.Fetch(repo, remote.Name, refSpecs, null, "");
+                        }
+                        foreach (var branch in repo.Branches.Where(b => b.IsRemote))
+                        {
+                            var localBranchName = branch.FriendlyName.Replace(branch.RemoteName + "/", "");
+                            if (repo.Branches[localBranchName] == null)
+                            {
+                                repo.Branches.Update(
+                                    repo.Branches.Add(localBranchName, branch.Tip),
+                                    b => b.TrackedBranch = branch.CanonicalName);
+                            }
+                            LibGit2Sharp.Commands.Checkout(repo, localBranchName);
+                            var signature = new LibGit2Sharp.Signature(UserName, UserName, new DateTimeOffset());
+                            var mergeOptions = new LibGit2Sharp.MergeOptions();
+                            repo.Merge(branch, signature, mergeOptions);
+                        }
+
+                    }
+                }
+                else
+                {
+                    var cloneOptions = new LibGit2Sharp.CloneOptions();
+                    LibGit2Sharp.Repository.Clone(repository.Url, path, cloneOptions);
+                }
+
+            }
+
+
+            public Models.Config.Workbooks RepositoriesConfig()
             {
                 var yaml = File.ReadAllText(Repositories);
                 var deserializer = new DeserializerBuilder()
                     .WithNamingConvention(new CamelCaseNamingConvention())
                     .Build();
-                var config = deserializer.Deserialize<Models.Config.Workbooks>(yaml);
-                foreach(var repository in config.Repositories)
-                {
-                    var path = Path.Combine(RepositoriesPath, repository.Alias);
-                    if (Directory.Exists(path))
-                    {
-                        using (var repo = new LibGit2Sharp.Repository(path))
-                        {
-                            foreach (var remote in repo.Network.Remotes)
-                            {
-                                IEnumerable<string> refSpecs = remote.FetchRefSpecs.Select(x => x.Specification);
-                                LibGit2Sharp.Commands.Fetch(repo, remote.Name, refSpecs, null, "");
-                            }
-                            foreach(var branch in repo.Branches.Where(b => b.IsRemote))
-                            {
-                                var localBranchName = branch.FriendlyName.Replace(branch.RemoteName + "/", "");
-                                if(repo.Branches[localBranchName] == null)
-                                {
-                                    repo.Branches.Update(
-                                        repo.Branches.Add(localBranchName, branch.Tip),
-                                        b => b.TrackedBranch = branch.CanonicalName);
-                                }
-                                LibGit2Sharp.Commands.Checkout(repo, localBranchName);
-                                var signature = new LibGit2Sharp.Signature(UserName, UserName, new DateTimeOffset());
-                                var mergeOptions = new LibGit2Sharp.MergeOptions();
-                                repo.Merge(branch, signature, mergeOptions);
-                            }
+                return deserializer.Deserialize<Models.Config.Workbooks>(yaml);
+            }
 
-                        }
-                    }
-                    else
-                    {
-                        var cloneOptions = new LibGit2Sharp.CloneOptions();
-                        LibGit2Sharp.Repository.Clone(repository.Url, path, cloneOptions);
-                    }
-                }
+            public void PullRepositories()
+            {
+                var config = RepositoriesConfig();
+                foreach (var repository in config.Repositories)
+                    PullRepository(repository);
             }
 
 
@@ -287,7 +298,7 @@ namespace Xltrail.Client
                         var id = CreateId();
                         var fileName = Path.GetFileName(workbook.Path);
                         ids[id] = new MenuItem(menuItem.Repository, new Workbook(menuItem.Workbook.Path, branch));
-                        str += "<button id='" + id + "' label='" + branch + "' imageMso='MicrosoftExcel' onAction='Workbook_Click' />\n";
+                        str += "<button id='" + id + "' label='" + branch + "' imageMso='MicrosoftExcel' onAction='OpenWorkbook_Click' />\n";
                     }
                 }
                 else
@@ -311,7 +322,7 @@ namespace Xltrail.Client
                         ids[id] = new MenuItem(menuItem.Repository, workbook);
                         if (workbook.Branches.Count == 1)
                         {
-                            str += "<button id='" + id + "' label='" + fileName + "' imageMso='MicrosoftExcel' onAction='Workbook_Click' />\n";
+                            str += "<button id='" + id + "' label='" + fileName + "' imageMso='MicrosoftExcel' onAction='OpenWorkbook_Click' />\n";
                         }
                         else
                         {
@@ -343,78 +354,69 @@ namespace Xltrail.Client
                 return true;
             }
 
-            public void CommitButton_Click(IRibbonControl control)
-            {
-                //save file
-                xlApp.ActiveWorkbook.Save();
-
-                //get reponame, file path and branch name
-                var path = xlApp.ActiveWorkbook.FullName;
-                var fileName = Path.GetFileNameWithoutExtension(path);
-                var fileExtension = Path.GetExtension(path);
-                var parts = fileName.Split('_');
-
-                var branch = parts.Last();
-                var repo = path.Substring(Staging.Length+1).Split('\\').First();
-                fileName = fileName.Substring(0, fileName.Length - branch.Length - 1) + fileExtension;
-
-                //workbook path inside repository
-                var filePath = Path.GetDirectoryName(Path.GetDirectoryName(path)).Substring(Path.Combine(Staging, repo).Length);
-                
-                var fileRepoPath = Path.Combine(RepositoriesPath, repo);
-                if(filePath.Length > 0)
-                    fileRepoPath = Path.Combine(fileRepoPath, filePath);
-                fileRepoPath = Path.Combine(fileRepoPath, fileName);
-
-                //get repository
-                var gitRepository = new LibGit2Sharp.Repository(Path.Combine(RepositoriesPath, repo));
-                LibGit2Sharp.Commands.Checkout(gitRepository, branch);
-
-                //pull from remote (to avoid conflicts)
-
-                //copy file from staging => repository
-                File.Copy(path, fileRepoPath, true);
-
-                //stage
-                LibGit2Sharp.Commands.Stage(gitRepository, fileRepoPath);
-
-                //commit
-                var author = new LibGit2Sharp.Signature("name", "email", new DateTimeOffset());
-                var commitOptions = new LibGit2Sharp.CommitOptions();
-                gitRepository.Commit("", author, author, commitOptions);
-
-
-                //push to remote
-                //gitRepository.Pu
-
-                /*
-                var stageOptions = new LibGit2Sharp.StageOptions()
-                {
-                    IncludeIgnored = false,
-                    ExplicitPathsOptions = new LibGit2Sharp.ExplicitPathsOptions();
-                }
-                gitRepository.Stage(fileRepoPath, stageOptions);
-                */
-
-            }
-
-
-            public void Refresh()
-            {
-                Pull(Config.Workbooks, Workbooks); //update config
-                PullRepositories();
-                Synchronise();
-            }
-
             public void Refresh_Click(IRibbonControl control)
             {
-                Refresh();
+                var cursor = xlApp.Cursor;
+                try
+                {
+                    xlApp.Cursor = Excel.XlMousePointer.xlWait;
+                    Refresh();
+                }
+                catch (Exception ex)
+                {
+                    xlApp.Cursor = cursor;
+                    System.Windows.Forms.MessageBox.Show(ex.Message, "Error", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    xlApp.Cursor = cursor;
+                }
             }
 
-            public void Workbook_Click(IRibbonControl control)
-            {
-                var menuItem = ids[control.Id];
 
+            public void CommitButton_Click(IRibbonControl control)
+            {
+                var cursor = xlApp.Cursor;
+                try
+                {
+                    xlApp.Cursor = Excel.XlMousePointer.xlWait;
+                    CommitAndPushWorkbook(xlApp.ActiveWorkbook);
+                }
+                catch(Exception ex)
+                {
+                    xlApp.Cursor = cursor;
+                    System.Windows.Forms.MessageBox.Show(ex.Message, "Error", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    xlApp.Cursor = cursor;
+                }
+            }
+
+            public void OpenWorkbook_Click(IRibbonControl control)
+            {
+                var cursor = xlApp.Cursor;
+                try
+                {
+                    xlApp.Cursor = Excel.XlMousePointer.xlWait;
+                    var menuItem = ids[control.Id];
+                    var workbook = OpenWorkbook(menuItem);
+                    xlApp.Workbooks.Open(workbook);
+                }
+                catch (Exception ex)
+                {
+                    xlApp.Cursor = cursor;
+                    System.Windows.Forms.MessageBox.Show(ex.Message, "Error", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    xlApp.Cursor = cursor;
+                }
+            }
+
+
+            public string OpenWorkbook(MenuItem menuItem)
+            {
                 //path to staged workbook file
                 var path = Path.Combine(
                     Staging,
@@ -447,8 +449,87 @@ namespace Xltrail.Client
                         contentStream.CopyTo(fileStream);
                     }
                 }
-                xlApp.Workbooks.Open(fileName);
+                return fileName;
             }
+
+            public void CommitAndPushWorkbook(Excel.Workbook workbook)
+            {
+                //refresh repository definitions
+                var config = RepositoriesConfig();
+
+                //save file
+                workbook.Save();
+
+                //get reponame, file path and branch name
+                var path = workbook.FullName;
+                var fileName = Path.GetFileNameWithoutExtension(path);
+                var fileExtension = Path.GetExtension(path);
+                var parts = fileName.Split('_');
+                var branchName = parts.Last();
+
+                fileName = fileName.Substring(0, fileName.Length - branchName.Length - 1) + fileExtension;
+                var repositoryName = path.Substring(Staging.Length+1).Split('\\').First();
+                var repository = config.Repositories.Where(r => r.Alias == repositoryName).FirstOrDefault();
+
+                if (repository == null)
+                    throw new Exception("Unknown repository: " + repositoryName);
+
+                //update repository from remote to avoid conflicts
+                PullRepository(repository);
+
+                //workbook path inside repository
+                var filePath = Path.GetDirectoryName(Path.GetDirectoryName(path)).Substring(Path.Combine(Staging, repositoryName).Length);
+                
+                var fileRepoPath = Path.Combine(RepositoriesPath, repositoryName);
+                if(filePath.Length > 0)
+                    fileRepoPath = Path.Combine(fileRepoPath, filePath);
+                fileRepoPath = Path.Combine(fileRepoPath, fileName);
+
+                //get repository
+                var gitRepository = new LibGit2Sharp.Repository(Path.Combine(RepositoriesPath, repositoryName));
+                LibGit2Sharp.Commands.Checkout(gitRepository, branchName);
+
+                //pull from remote (to avoid conflicts)
+
+                //copy file from staging => repository
+                File.Copy(path, fileRepoPath, true);
+
+                //stage
+                LibGit2Sharp.Commands.Stage(gitRepository, fileRepoPath);
+
+                //commit
+                var author = new LibGit2Sharp.Signature(UserName, UserName, new DateTimeOffset());
+                var commitOptions = new LibGit2Sharp.CommitOptions();
+                var commitMessage = "Updated " + fileName;
+
+                gitRepository.Commit(commitMessage, author, author, commitOptions);
+
+                //get credentials
+                var pushUrl = gitRepository.Network.Remotes["origin"].PushUrl;
+                var credentials = Config.Credentials.Where(c => pushUrl.StartsWith(c.Url)).FirstOrDefault();
+
+                LibGit2Sharp.PushOptions pushOptions = new LibGit2Sharp.PushOptions();
+                if(credentials != null)
+                {
+                    pushOptions.CredentialsProvider = new LibGit2Sharp.Handlers.CredentialsHandler(
+                        (url, usernameFromUrl, types) =>
+                            new LibGit2Sharp.UsernamePasswordCredentials()
+                            {
+                                Username = credentials.Username,
+                                Password = credentials.Password
+                            });
+                }
+                gitRepository.Network.Push(gitRepository.Branches[branchName], pushOptions);
+            }
+
+
+            public void Refresh()
+            {
+                Pull(Config.Workbooks, Workbooks); //update config
+                PullRepositories();
+                Synchronise();
+            }
+
 
         }
     }
