@@ -3,6 +3,6 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|AnyCPU'">
     <StartAction>Program</StartAction>
     <StartProgram>C:\Program Files %28x86%29\Microsoft Office\Root\Office16\EXCEL.EXE</StartProgram>
-    <StartArguments>"XltrailClient.xll"</StartArguments>
+    <StartArguments>"XltrailClient-packed.xll"</StartArguments>
   </PropertyGroup>
 </Project>

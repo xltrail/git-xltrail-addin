@@ -1,94 +1,162 @@
 ﻿using System.Collections.Generic;
 using LibGit2Sharp;
 using System.Linq;
+using System;
 
 namespace Xltrail.Client.Models
 {
-
-    public class Folder
-    {
-        public IList<Workbook> Workbooks;
-        public HashSet<string> Folders;
-
-        public Folder()
-        {
-            Workbooks = new List<Workbook>();
-            Folders = new HashSet<string>();
-        }
-    }
-
-
     public class Repository
     {
         public LibGit2Sharp.Repository GitRepository { get; private set; }
-        private IDictionary<string, IList<string>> workbooks;
+        public string Id { get; private set; }
         public string Path { get; private set; }
+        public string Name { get; private set; }
+        public IList<Workbook> Workbooks { get; private set; }
+        public Dictionary<string, string> Folders { get; private set; }
 
         public Repository(string path)
         {
+            Id = CreateId();
             Path = path;
+            Name = System.IO.Path.GetFileName(path);
             GitRepository = new LibGit2Sharp.Repository(path);
-            workbooks = GetWorkbooks();
+            InitialiseWorkbooks();
+        }
+
+        private string CreateId()
+        {
+            return "id-" + Convert.ToBase64String(Guid.NewGuid().ToByteArray()).Replace("+", "").Replace("/", "_").Replace(" ", "").Replace("=", "");
         }
 
         public static bool IsValid(string path)
         {
             return LibGit2Sharp.Repository.IsValid(path);
-
         }
 
-        private IDictionary<string, IList<string>> GetWorkbooks()
+        public Workbook GetWorkbookById(string id)
         {
-            var workbooks = new Dictionary<string, IList<string>>();
-            foreach(var branch in GitRepository.Branches)
+            return Workbooks.Where(workbook => workbook.Id == id).FirstOrDefault();
+        }
+
+        public Branch GetWorkbookBranchById(string id)
+        {
+            foreach(var workbook in Workbooks)
+            {
+                foreach(var branch in workbook.Branches)
+                {
+                    if (branch.Id == id)
+                        return branch;
+                }
+            }
+            return null;
+        }
+
+        public static List<string> TraverseFolders(string path)
+        {
+            var separator = '/';
+            var parts = path.Split(separator);
+            var folders = new List<string>();
+
+            foreach (var part in parts)
+            {
+                if(folders.Count == 0)
+                {
+                    folders.Add(part);
+                }
+                else
+                {
+                    folders.Add(folders.Last() + separator + part);
+                }
+            }
+
+            if (folders[0] != "")
+                folders.Insert(0, "");
+
+            return folders;
+        }
+
+        private void InitialiseWorkbooks()
+        {
+            Folders = new Dictionary<string, string>();
+            Workbooks = new List<Workbook>();
+            foreach (var branch in GitRepository.Branches.Where(branch => !branch.IsRemote))
             {
                 Commands.Checkout(GitRepository, branch);
                 foreach (var file in GitRepository.Index)
                 {
                     if (IsWorkbook(file.Path))
                     {
-                        if (!workbooks.ContainsKey(file.Path))
-                            workbooks[file.Path] = new List<string>();
-                        workbooks[file.Path].Add(branch.FriendlyName);
+                        var workbook = Workbooks.Where(x => x.Path == file.Path).FirstOrDefault();
+                        if (workbook == null)
+                        {
+                            workbook = new Workbook(this, file.Path);
+                            Workbooks.Add(workbook);
+                            foreach(var folder in TraverseFolders(workbook.Folder))
+                            {
+                                if (!Folders.ContainsKey(folder))
+                                {
+                                    Folders[folder] = CreateId();
+                                }
+                            }
+                        }
                     }
                 }
             }
-            return workbooks;
         }
 
-            private bool IsWorkbook(string path)
+        private bool IsWorkbook(string path)
         {
             return (
                 path.EndsWith(".xls") ||
+                path.EndsWith(".xlsx") ||
                 path.EndsWith(".xlsb") ||
                 path.EndsWith(".xlsm") ||
-                path.EndsWith(".xlsx") ||
                 path.EndsWith(".xla") ||
                 path.EndsWith(".xlam"));
         }
 
-        public Folder Workbooks(string path)
+        public IList<Workbook> GetWorkbooks(string path)
         {
-            var folder = new Folder();
+            var files = new List<Workbook>();
+            if (path == null)
+                return files;
 
-            foreach (var workbook in workbooks.Keys)
+            foreach (var workbook in Workbooks)
             {
-                if (workbook.StartsWith(path))
+                if (workbook.Path.StartsWith(path))
                 {
-                    if(System.IO.Path.GetDirectoryName(workbook) == path)
+                    if (path == System.IO.Path.GetDirectoryName(workbook.Path).Replace("\\", "/"))
                     {
-                        folder.Workbooks.Add(new Workbook(
-                            workbook,
-                            workbooks[workbook].Select(b => b.Replace("origin/", "")).Where(b => b != "HEAD").Distinct().ToList()));
-                    }
-                    else
-                    {
-                        folder.Folders.Add(System.IO.Path.GetDirectoryName(workbook));
+                        files.Add(workbook);
                     }
                 }
             }
-            return folder;
+            return files;
         }
 
+        public IList<string> GetFolders(string path)
+        {
+            var folders = new List<string>();
+            if (path == null)
+                return folders;
+
+            foreach (var workbook in Workbooks)
+            {
+                if (workbook.Path.StartsWith(path))
+                {
+                    var p = System.IO.Path.GetDirectoryName(workbook.Path).Replace("\\", "/");
+                    if (p != path)
+                    {
+                        var subPath = workbook.Path.Substring(path.Length);
+                        if (subPath.StartsWith("/"))
+                            subPath = subPath.Substring(1);
+                        var f = subPath.Split('/').First();
+                        if (f != null)
+                            folders.Add(f);
+                    }
+                }
+            }
+            return folders.Distinct().OrderBy(x => x).ToList();
+        }
     }
 }

@@ -42,7 +42,7 @@ namespace Xltrail.Client.Models.Config
             [YamlMember(Alias = "username", ApplyNamingConventions = false)]
             public string Username { get; set; }
 
-            [YamlMember(Alias = "passowrd", ApplyNamingConventions = false)]
+            [YamlMember(Alias = "password", ApplyNamingConventions = false)]
             public string Password { get; set; }
         }
     }
