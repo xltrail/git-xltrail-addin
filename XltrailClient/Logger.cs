@@ -23,7 +23,7 @@ namespace Xltrail.Client
             roller.File = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "xltrail", "logs", "xltrail-addin.log");
             roller.Layout = patternLayout;
             roller.MaxSizeRollBackups = 5;
-            roller.MaximumFileSize = "1MB";
+            roller.MaximumFileSize = "1048576";
             roller.RollingStyle = RollingFileAppender.RollingMode.Size;
             roller.StaticLogFileName = true;
             roller.ActivateOptions();

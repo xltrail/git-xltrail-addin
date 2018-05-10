@@ -17,8 +17,8 @@ namespace Xltrail.Client.Models
         public Workbook(Repository repository, string path)
         {
             Id = "id-" + Convert.ToBase64String(Guid.NewGuid().ToByteArray()).Replace("+", "").Replace("/", "_").Replace(" ", "").Replace("=", "");
-            Path = path;
-            Folder = System.IO.Path.GetDirectoryName(Path).Replace("\\", "/");
+            Path = path.Replace("\\", "/");
+            Folder = System.IO.Path.GetDirectoryName(Path.Replace("/", "\\")).Replace("\\", "/");
             Repository = repository;
             InitialiseBranches();
         }

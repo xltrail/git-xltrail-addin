@@ -115,6 +115,18 @@ namespace Xltrail.Client.Models
                 path.EndsWith(".xlam"));
         }
 
+        public Branch GetWorkbookBranchFromPath(string path)
+        {
+            foreach(var workbook in Workbooks)
+            {
+                var branch = workbook.Branches.Where(b => b.Path == path).FirstOrDefault();
+                if (branch != null)
+                    return branch;
+            }
+            return null;
+        } 
+
+
         public IList<Workbook> GetWorkbooks(string path)
         {
             var files = new List<Workbook>();

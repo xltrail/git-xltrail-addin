@@ -77,7 +77,20 @@ namespace Xltrail.Client.Test
         }
 
         [Test]
-        public void TestInitialiseRepository()
+        public void TestWorkbooks()
+        {
+            var repository = new Repository(path);
+
+            //workbooks
+            Assert.AreEqual(2, repository.Workbooks.Count);
+
+            var workbook = repository.GetWorkbooks("xlwings/tests").First();
+            Assert.AreEqual("xlwings/tests/test book.xlsx", workbook.Path);
+            Assert.AreEqual(new List<string>() { "xlwings/tests/test book.xlsx/test book_dev.xlsx", "xlwings/tests/test book.xlsx/test book_master.xlsx" }, workbook.Branches.Select(x => x.Path));
+        }
+
+        [Test]
+        public void TestCanGetFoldersAndWorkbooks()
         {
             var repository = new Repository(path);
 
@@ -96,8 +109,6 @@ namespace Xltrail.Client.Test
             Assert.AreEqual(new List<string>(), repository.GetFolders("xlwings/tests"));
             Assert.AreEqual(new List<string>() { "xlwings/tests/test book.xlsx" }, repository.GetWorkbooks("xlwings/tests").Select(x => x.Path).ToList());
 
-            //Assert.AreEqual(new List<string>() { "dev", "master" }, repository.GetWorkbooks("").First().Branches);
-            //Assert.AreEqual(new List<string>() { "master" }, repository.GetWorkbooks("level1/level2").First().Branches);
         }
     }
 }

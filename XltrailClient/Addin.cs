@@ -9,6 +9,7 @@ using YamlDotNet.Serialization.NamingConventions;
 using System.IO;
 using Excel=Microsoft.Office.Interop.Excel;
 using Xltrail.Client.Models;
+using Xltrail.Client.Providers;
 using System.Security.Cryptography;
 using log4net;
 using System.Threading;
@@ -39,7 +40,7 @@ namespace Xltrail.Client
             IRibbonUI ribbon;
 
 
-            private void SetupPaths()
+            private void Initialise()
             {
                 if (!Directory.Exists(StagingPath))
                     Directory.CreateDirectory(StagingPath);
@@ -53,13 +54,36 @@ namespace Xltrail.Client
 
             public void AutoOpen()
             {
-                SetupPaths();
+                Initialise();
                 Logger.Setup();
                 logger.Info("Starting Addin");
                 xlApp = (Excel.Application)ExcelDnaUtil.Application;
                 xlApp.WorkbookActivate += XlApp_WorkbookActivate;
+                xlApp.WorkbookAfterSave += XlApp_WorkbookAfterSave;
                 Config = LoadConfig();
                 RefreshAll();
+            }
+
+            private void XlApp_WorkbookAfterSave(Excel.Workbook Wb, bool Success)
+            {
+                var path = Wb.FullName;
+                if (!path.StartsWith(StagingPath))
+                    return;
+
+                //get workbookBranch from workbook path/filename
+                var workbookPath = path.Substring(StagingPath.Length + 1).Replace("\\", "/");
+                var workbookBranch = repositories.GetWorkbookVersionFromPath(workbookPath);
+
+                //circuit breaker
+                if (workbookBranch == null)
+                    return;
+
+                //get credentials
+                var pushUrl = workbookBranch.Workbook.Repository.GitRepository.Network.Remotes["origin"].PushUrl;
+                var credentials = Config.Credentials.Where(c => pushUrl.StartsWith(c.Url)).FirstOrDefault();
+
+                //commit
+                workbookBranch.Commit(path, credentials.Username ?? Environment.UserName, credentials.Email);
             }
 
             private void ShowNotification(string description)
@@ -107,135 +131,6 @@ namespace Xltrail.Client
                 var yaml = File.ReadAllText(ConfigPath);
                 var deserializer = new DeserializerBuilder().WithNamingConvention(new CamelCaseNamingConvention()).Build();
                 return deserializer.Deserialize<Models.Config.Config>(yaml);
-            }
-
-
-            public void Pull(string url, string path)
-            {
-                //Fetch from remote
-                logger.InfoFormat("Pull from remote Git: {0} => {1}", url, path);
-                logger.InfoFormat("Get credentials from config: {0}", url);
-                var credentials = Config.Credentials.Where(c => url.StartsWith(c.Url)).FirstOrDefault();
-                if (!Directory.Exists(path))
-                {
-                    logger.Info("Repository does not exist locally, clone remote");
-                    var cloneOptions = new LibGit2Sharp.CloneOptions();
-                    if (credentials != null)
-                    {
-                        cloneOptions.CredentialsProvider = (_url, _user, _cred) => new LibGit2Sharp.UsernamePasswordCredentials
-                        {
-                            Username = credentials.Username,
-                            Password = credentials.Password
-                        };
-                    }
-                    ShowNotification(string.Format("Clone repository {0}", url));
-                    LibGit2Sharp.Repository.Clone(url, path, cloneOptions);
-                }
-                else
-                {
-                    logger.Info("Repository exists locally, fetch from remote");
-                    var fetchOptions = new LibGit2Sharp.FetchOptions();
-                    if (credentials != null)
-                    {
-                        fetchOptions.CredentialsProvider = (_url, _user, _cred) => new LibGit2Sharp.UsernamePasswordCredentials
-                        {
-                            Username = credentials.Username,
-                            Password = credentials.Password
-                        };
-                    }
-                    using (var repository = new LibGit2Sharp.Repository(path))
-                    {
-                        foreach (var remote in repository.Network.Remotes)
-                        {
-                            IEnumerable<string> refSpecs = remote.FetchRefSpecs.Select(x => x.Specification);
-                            LibGit2Sharp.Commands.Fetch(repository, remote.Name, refSpecs, fetchOptions, "");
-                        }
-                        foreach (var branch in repository.Branches.Where(b => b.IsRemote))
-                        {
-                            var localBranchName = branch.FriendlyName.Replace(branch.RemoteName + "/", "");
-                            if (repository.Branches[localBranchName] == null)
-                            {
-                                repository.Branches.Update(
-                                    repository.Branches.Add(localBranchName, branch.Tip),
-                                    b => b.TrackedBranch = branch.CanonicalName);
-                            }
-                            var localBranch = repository.Branches[localBranchName];
-                            if(localBranch.Tip != branch.Tip)
-                            {
-                                ShowNotification(string.Format("Update repository {0}", url));
-
-                                //check out branch and reset
-                                LibGit2Sharp.Commands.Checkout(repository, localBranchName);
-                                repository.Reset(LibGit2Sharp.ResetMode.Hard, branch.Tip);
-
-                                //if there is an open workbook (staging) which has just been
-                                //updated from remote (repositories), send notification
-                            }
-                        }
-
-                    }
-                }
-            }
-
-            public void PullRepository(Models.Config.Workbooks.Repository repository)
-            {
-                var path = Path.Combine(RepositoriesPath, repository.Alias);
-                logger.InfoFormat("Pull Git repository: {0} => {1}", repository.Url, path);
-
-                if (Directory.Exists(path))
-                {
-                    using (var repo = new LibGit2Sharp.Repository(path))
-                    {
-                        foreach (var remote in repo.Network.Remotes)
-                        {
-                            IEnumerable<string> refSpecs = remote.FetchRefSpecs.Select(x => x.Specification);
-                            LibGit2Sharp.Commands.Fetch(repo, remote.Name, refSpecs, null, "");
-                        }
-                        foreach (var branch in repo.Branches.Where(b => b.IsRemote))
-                        {
-                            var localBranchName = branch.FriendlyName.Replace(branch.RemoteName + "/", "");
-                            if (repo.Branches[localBranchName] == null)
-                            {
-                                repo.Branches.Update(
-                                    repo.Branches.Add(localBranchName, branch.Tip),
-                                    b => b.TrackedBranch = branch.CanonicalName);
-                            }
-                            LibGit2Sharp.Commands.Checkout(repo, localBranchName);
-
-                            //merge if...
-                            //1. there was a change upstream
-                            //2. there was a change upstream
-                            var localBranch = repo.Branches[localBranchName];
-                            if (localBranch.Tip != branch.Tip)
-                            {
-                                var url = repo.Network.Remotes["origin"].PushUrl;
-                                logger.InfoFormat("Repository {0} changed upstream, merge changes locally", url);
-                                ShowNotification(string.Format("Update available, pulling changes {0}...", url));
-
-                                var credentials = Config.Credentials.Where(c => url.StartsWith(c.Url)).FirstOrDefault();
-                                var signature = new LibGit2Sharp.Signature(credentials.Username ?? Environment.UserName, credentials.Email, DateTime.Now);
-                                var mergeOptions = new LibGit2Sharp.MergeOptions();
-                                repo.Merge(branch, signature, mergeOptions);
-                            }
-
-                            //we need to duplicate the branches
-                            var wipBranchName = localBranchName + "_local";
-                            if(repo.Branches[wipBranchName] == null)
-                            {
-                                repo.Branches.Update(
-                                    repo.Branches.Add(wipBranchName, branch.Tip),
-                                    b => b.TrackedBranch = branch.CanonicalName);
-                            }
-                        }
-
-                    }
-                }
-                else
-                {
-                    var cloneOptions = new LibGit2Sharp.CloneOptions();
-                    LibGit2Sharp.Repository.Clone(repository.Url, path, cloneOptions);
-                }
-
             }
 
 
@@ -297,21 +192,6 @@ namespace Xltrail.Client
             }
 
 
-            private string StagedWorkbookPath(string repository, string branch, string workbookPath)
-            {
-                var path = Path.Combine(
-                    Environment.GetEnvironmentVariable("LocalAppData"),
-                    "xltrail",
-                    "staging",
-                    repository,
-                    workbookPath);
-
-                return Path.Combine(path, Path.GetFileNameWithoutExtension(workbookPath)
-                    + "_" + branch.Replace("origin/", "")
-                    + "_local"
-                    + Path.GetExtension(workbookPath));
-            }
-
             private string GetSHA1Hash(Stream stream)
             {
                 using (SHA1Managed sha = new SHA1Managed())
@@ -330,18 +210,20 @@ namespace Xltrail.Client
                 }
             }
 
+
             public string BuildWorkbookMenu(IRibbonControl control)
             {
                 ribbon.Invalidate();
-                var workbook = repositories.GetWorkbook(control.Id);
+                var workbook = repositories.GetWorkbookFromId(control.Id);
                 var str = "<menu xmlns='http://schemas.microsoft.com/office/2006/01/customui'>\n";
-                foreach (var branch in workbook.Branches)
+                foreach (var branch in workbook.Branches.Where(b => b.IsStagingBranch || b.HasConflict))
                 {
                     str += "<button id='" + branch.Id + "' label='" + branch.DisplayName + "' imageMso='MicrosoftExcel' onAction='OpenWorkbook_Click' />\n";
                 }
                 str += "</menu>";
                 return str;
             }
+
 
             public string BuildMenu(IRibbonControl control)
             {
@@ -360,7 +242,7 @@ namespace Xltrail.Client
                 }
                 else
                 {
-                    var repositoryAndFolder = repositories.GetRepository(control.Id);
+                    var repositoryAndFolder = repositories.GetRepositoryFromId(control.Id);
                     var repository = repositoryAndFolder.Item1;
                     var path = repositoryAndFolder.Item2;
 
@@ -388,6 +270,7 @@ namespace Xltrail.Client
                 str += "</menu>";
                 return str;
             }
+
 
             public string GetActiveWorkbookName(IRibbonControl control)
             {
@@ -454,9 +337,16 @@ namespace Xltrail.Client
                 try
                 {
                     xlApp.Cursor = Excel.XlMousePointer.xlWait;
-                    var workbookVersion = repositories.GetWorkbookVersion(control.Id);
+                    var workbookVersion = repositories.GetWorkbookVersionFromId(control.Id);
                     var workbookPath = OpenWorkbook(workbookVersion);
-                    xlApp.Workbooks.Open(workbookPath);
+                    if (!workbookVersion.IsStagingBranch)
+                    {
+                        xlApp.Workbooks.Open(workbookPath, false, true);
+                    }
+                    else
+                    {
+                        xlApp.Workbooks.Open(workbookPath);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -472,7 +362,7 @@ namespace Xltrail.Client
             public string OpenWorkbook(Branch branch)
             {
                 //path to staged workbook file
-                var fileName = Path.Combine(StagingPath, branch.Path);
+                var fileName = Path.Combine(StagingPath, branch.Workbook.Repository.Name, branch.Path);
                 var dirName = Path.GetDirectoryName(fileName);
 
                 if (!Directory.Exists(dirName))
@@ -532,7 +422,10 @@ namespace Xltrail.Client
                     throw new Exception("Unknown repository: " + repositoryName);
 
                 //update repository from remote to avoid conflicts
-                PullRepository(repository);
+                var repositoryPath = Path.Combine(RepositoriesPath, repository.Alias);
+                var credentials = Config.Credentials.Where(c => repository.Url.StartsWith(c.Url)).FirstOrDefault();
+                GitProvider.PullFromRemote(repository.Url, repositoryPath, credentials);
+
 
                 //workbook path inside repository
                 var filePath = Path.GetDirectoryName(Path.GetDirectoryName(path)).Substring(Path.Combine(StagingPath, repositoryName).Length);
@@ -556,7 +449,7 @@ namespace Xltrail.Client
 
                 //get credentials
                 var pushUrl = gitRepository.Network.Remotes["origin"].PushUrl;
-                var credentials = Config.Credentials.Where(c => pushUrl.StartsWith(c.Url)).FirstOrDefault();
+                credentials = Config.Credentials.Where(c => pushUrl.StartsWith(c.Url)).FirstOrDefault();
 
                 //commit
                 var author = new LibGit2Sharp.Signature(credentials.Username ?? Environment.UserName, credentials.Email, DateTime.Now);
@@ -585,11 +478,14 @@ namespace Xltrail.Client
             {
                 try
                 {
-                    logger.Info("Refresh repositories config from remote");
+                    logger.Info("Refresh config from remote");
                     if (Config.Repositories != null)
                     {
-                        logger.InfoFormat("Update workbooks config from {0}", Config.Repositories);
-                        Pull(Config.Repositories, WorkbooksPath);
+                        logger.InfoFormat("Update config from {0}", Config.Repositories);
+                        GitProvider.PullFromRemote(
+                            Config.Repositories,
+                            WorkbooksPath,
+                            Config.Credentials.Where(c => Config.Repositories.StartsWith(c.Url)).FirstOrDefault());
                     }
                     else
                     {
@@ -598,7 +494,12 @@ namespace Xltrail.Client
 
                     var repositoriesConfig = LoadRepositoriesConfig();
                     foreach (var repository in repositoriesConfig.Repositories)
-                        PullRepository(repository);
+                    {
+                        var repositoryPath = Path.Combine(RepositoriesPath, repository.Alias);
+                        var credentials = Config.Credentials.Where(c => repository.Url.StartsWith(c.Url)).FirstOrDefault();
+                        GitProvider.PullFromRemote(repository.Url, repositoryPath, credentials);
+                        GitProvider.EnsureStagingBranches(repositoryPath);
+                    }
 
                     ReadRepositoriesFromFilesystem();
                 }

@@ -104,15 +104,14 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Models\Config\Workbooks.cs" />
     <Compile Include="Models\Repository.cs" />
+    <Compile Include="Providers\GitProvider.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="XltrailClient.dna" />
     <None Include="packages.config" />
     <None Include="Properties\ExcelDna.Build.props" />
   </ItemGroup>
-  <ItemGroup>
-    <Folder Include="Providers\" />
-  </ItemGroup>
+  <ItemGroup />
   <ItemGroup>
     <COMReference Include="Microsoft.Vbe.Interop.Forms">
       <Guid>{0D452EE1-E08F-101A-852E-02608C4D0BB4}</Guid>

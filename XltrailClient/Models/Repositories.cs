@@ -38,7 +38,7 @@ namespace Xltrail.Client.Models
             }
         }
 
-        public (Repository, string) GetRepository(string id)
+        public (Repository, string) GetRepositoryFromId(string id)
         {
             foreach (var repository in repositories)
             {
@@ -52,7 +52,7 @@ namespace Xltrail.Client.Models
             return (null, null);
         }
 
-        public Workbook GetWorkbook(string id)
+        public Workbook GetWorkbookFromId(string id)
         {
             foreach (var repository in repositories)
             {
@@ -65,7 +65,7 @@ namespace Xltrail.Client.Models
             return null;
         }
 
-        public Branch GetWorkbookVersion(string id)
+        public Branch GetWorkbookVersionFromId(string id)
         {
             foreach (var repository in repositories)
             {
@@ -77,6 +77,24 @@ namespace Xltrail.Client.Models
                             return branch;
                     }
                 }
+            }
+            return null;
+        }
+
+        public Branch GetWorkbookVersionFromPath(string path)
+        {
+            var repoName = path.Split('/').First();
+            var workbookBranchPath = String.Join("/", path.Split('/').Skip(1));
+
+            var repository = repositories.Where(r => r.Name == repoName).FirstOrDefault();
+            if (repository == null)
+                return null;
+
+            foreach (var workbook in repository.Workbooks)
+            {
+                var branch = workbook.Branches.Where(b => b.Path == workbookBranchPath).FirstOrDefault();
+                if (branch != null)
+                    return branch;
             }
             return null;
         }
