@@ -110,5 +110,47 @@ namespace Xltrail.Client.Test
             Assert.AreEqual(new List<string>() { "xlwings/tests/test book.xlsx" }, repository.GetWorkbooks("xlwings/tests").Select(x => x.Path).ToList());
 
         }
+
+        [Test]
+        public void TestCanCheckout()
+        {
+            var repository = new Repository(path);
+            var workbook = repository.GetWorkbooks("xlwings/tests").First();
+
+            Assert.AreEqual(2, workbook.Branches.Count);
+
+            var branch = workbook.GetBranch("dev");
+            Assert.IsFalse(branch.IsStagingBranch);
+
+            var stagingBranch = branch.Checkout();
+            Assert.IsTrue(stagingBranch.IsStagingBranch);
+            Assert.AreEqual(branch.BranchId, stagingBranch.BranchId);
+
+            Assert.AreEqual(3, workbook.Branches.Count);
+
+            //get branch from stagingBranch
+            branch = stagingBranch.OtherBranch;
+            Assert.AreEqual(branch.Name, "dev");
+            Assert.IsFalse(branch.IsStagingBranch);
+
+            branch.Checkout();
+            Assert.AreEqual(3, workbook.Branches.Count);
+        }
+
+        [Test]
+        public void TestCanDeleteCheckout()
+        {
+            var repository = new Repository(path);
+            var workbook = repository.GetWorkbooks("xlwings/tests").First();
+
+            Assert.AreEqual(2, workbook.Branches.Count);
+
+            var branch = workbook.GetBranch("dev");
+            var stagingBranch = branch.Checkout();
+            Assert.AreEqual(3, workbook.Branches.Count);
+
+            stagingBranch.Discard();
+            Assert.AreEqual(2, workbook.Branches.Count);
+        }
     }
 }

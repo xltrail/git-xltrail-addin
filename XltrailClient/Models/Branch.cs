@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -7,23 +8,38 @@ namespace Xltrail.Client.Models
 {
     public class Branch
     {
-        public static string StagingBranchSuffix = "_local";
+        public static string StagingBranchPrefix = "staging__";
 
         public Workbook Workbook { get; private set; }
         public string Id { get; private set; }
         public string Name { get; private set; }
         public string Path { get; private set; }
         public string FileName { get; private set; }
-        public bool IsStagingBranch { get; private set; }
 
         public Branch(Workbook workbook, string branch)
         {
             Id = "id-" + Convert.ToBase64String(Guid.NewGuid().ToByteArray()).Replace("+", "").Replace("/", "_").Replace(" ", "").Replace("=", "");
             Workbook = workbook;
             Name = branch;
-            FileName = System.IO.Path.GetFileNameWithoutExtension(Workbook.Path) + "_" + Name + System.IO.Path.GetExtension(Workbook.Path);
+            FileName = System.IO.Path.GetFileNameWithoutExtension(Workbook.Path) + "_" + DisplayName + (IsStagingBranch? "_local" : "") + System.IO.Path.GetExtension(Workbook.Path);
             Path = System.IO.Path.Combine(Workbook.Path, FileName).Replace("\\", "/");
-            IsStagingBranch = Name.EndsWith(StagingBranchSuffix) && Regex.Matches(Name, StagingBranchSuffix).Count % 2 != 0;
+        }
+
+        public bool IsStagingBranch
+        {
+            get
+            {
+                return Name.StartsWith(StagingBranchPrefix) && Regex.Matches(Name, StagingBranchPrefix).Count % 2 != 0;
+            }
+        }
+
+        public string BranchId
+        {
+            get
+            {
+                var history = GetHistory().ToList();
+                return history.Last().Commit.Sha;
+            }
         }
 
         public void Commit(string path, string userName, string email)
@@ -49,30 +65,88 @@ namespace Xltrail.Client.Models
             Workbook.Repository.GitRepository.Commit(commitMessage, author, committer, commitOptions);
         }
 
+        public void Discard()
+        {
+            if (!IsStagingBranch)
+                throw new Exception("Can only discard staging branch");
+
+            //checkout branch
+            LibGit2Sharp.Commands.Checkout(Workbook.Repository.GitRepository, OtherBranchName);
+
+            //delete Git staging branch
+            Workbook.Repository.GitRepository.Branches.Remove(Name);
+
+            //delete branch from workbook
+            Workbook.Branches.Remove(this);
+        }
+
+        public Branch Checkout()
+        {
+            if (IsStagingBranch)
+                throw new Exception("Cannot check out staging branch");
+
+            var stagingBranchName = StagingBranchPrefix + BranchId + "__" + Name;
+            var libGit2Branch = Workbook.Repository.GitRepository.Branches[Name];
+
+            //create staging branch if not exists
+            if (Workbook.Repository.GitRepository.Branches[stagingBranchName] == null)
+            {
+                Workbook.Repository.GitRepository.Branches.Update(
+                    Workbook.Repository.GitRepository.Branches.Add(stagingBranchName, libGit2Branch.Tip),
+                    b => b.TrackedBranch = libGit2Branch.CanonicalName);
+
+                Workbook.Branches.Add(new Branch(Workbook, stagingBranchName));
+            }
+
+            //checkout staging branch
+            LibGit2Sharp.Commands.Checkout(Workbook.Repository.GitRepository, stagingBranchName);
+            return Workbook.Branches.Where(branch => branch.Name == stagingBranchName).FirstOrDefault();
+        }
+
         public string DisplayName
         {
             get
             {
                 if (!IsStagingBranch)
+                    return Name;
+
+                return Name.Substring(StagingBranchPrefix.Length + BranchId.Length + 2);
+            }
+        }
+
+        public string Description
+        {
+            get
+            {
+                var head = GetHeadCommit();
+                if (!IsStagingBranch)
                 {
-                    var headCommit = GetHeadCommit();
-                    return Name + " [origin, created by " + headCommit.Author.Name + ", " + headCommit.Author.When.ToLocalTime().DateTime.ToString("MMMM dd, yyyy, HH:MM:ss") + "]";
+                    return DisplayName + " [origin, created by " + head.Author.Name + ", " + head.Author.When.ToLocalTime().DateTime.ToString("MMMM dd, yyyy, HH:MM:ss") + "]";
                 }
+                return DisplayName + " [" + head.Author.Name + ", " + head.Author.When.ToLocalTime().DateTime.ToString("MMMM dd, yyyy, HH:MM:ss") + "]" + (HasConflict ? "*" : "");
+            }
+        }
 
 
-                var displayName = Name.Substring(0, Name.Length - StagingBranchSuffix.Length);
+        private string OtherBranchName
+        {
+            get
+            {
+                if (!IsStagingBranch)
+                    return Name;
 
-                //find corresponding branch
-                var branch = Workbook.Branches.Where(b => b.Name == displayName).FirstOrDefault();
-                var branchHeadCommit = branch.GetHeadCommit();
+                return Name.Substring(StagingBranchPrefix.Length + BranchId.Length + 2);
+            }
+        }
 
-                //check if heads match
-                if(branchHeadCommit.Sha != Head)
-                {
-                    displayName += " [your version, last modified " + branchHeadCommit.Author.When.ToLocalTime().DateTime.ToString("MMMM dd, yyyy, HH:MM:ss") + "]";
-                }
+    public Branch OtherBranch
+        {
+            get
+            {
+                //find corresponding `other` branch
+                var otherBranch = Workbook.Branches.Where(b => b.Name == OtherBranchName).FirstOrDefault();
 
-                return displayName;
+                return otherBranch;
             }
         }
 
@@ -80,23 +154,25 @@ namespace Xltrail.Client.Models
         {
             get
             {
-                if (IsStagingBranch)
-                    return false;
-
-                //find corresponding staging branch
-                var stagingBranch = Workbook.Branches.Where(b => b.Name == Name + StagingBranchSuffix).FirstOrDefault();
+                //find corresponding `other` branch
+                var otherBranch = OtherBranch;
 
                 //circuit breaker
-                if (stagingBranch == null)
+                if (otherBranch == null)
                     return false;
 
-                var stagingHead = stagingBranch.Head;
-                var head = Head;
-
-                return stagingHead != head;
+                return otherBranch.Head != Head;
             }
         }
 
+        private IEnumerable<LibGit2Sharp.LogEntry> GetHistory()
+        {
+            return Workbook
+             .Repository
+             .GitRepository
+             .Commits
+             .QueryBy(Workbook.Path, new LibGit2Sharp.CommitFilter { IncludeReachableFrom = Name });
+        }
 
         public LibGit2Sharp.Commit GetHeadCommit()
         {

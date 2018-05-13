@@ -20,7 +20,7 @@ namespace Xltrail.Client.Providers
                 {
                     //we need to duplicate the branches
                     var localBranchName = branch.FriendlyName.Replace(branch.RemoteName + "/", "");
-                    var stagingBranchName = localBranchName + Branch.StagingBranchSuffix;
+                    var stagingBranchName = localBranchName + Branch.StagingBranchPrefix;
                     if (repo.Branches[stagingBranchName] == null)
                     {
                         repo.Branches.Update(

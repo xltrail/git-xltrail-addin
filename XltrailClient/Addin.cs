@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Linq;
 using ExcelDna.Integration;
 using System.Runtime.InteropServices;
@@ -10,9 +9,11 @@ using System.IO;
 using Excel=Microsoft.Office.Interop.Excel;
 using Xltrail.Client.Models;
 using Xltrail.Client.Providers;
+using Config = Xltrail.Client.Models.Config;
 using System.Security.Cryptography;
 using log4net;
 using System.Threading;
+using System.Collections.Generic;
 
 namespace Xltrail.Client
 {
@@ -24,18 +25,16 @@ namespace Xltrail.Client
             static Excel.Application xlApp;
             static string XltrailPath = Path.Combine(Environment.GetEnvironmentVariable("LocalAppData"), "xltrail");
             static string ConfigPath = Path.Combine(XltrailPath, "config.yaml");
+            static string ConfigPathRepositories = Path.Combine(XltrailPath, "config", "config.yaml");
 
             static string StagingPath = Path.Combine(XltrailPath, "staging");
-            static string WorkbooksPath = Path.Combine(XltrailPath, "config");
             static string RepositoriesPath = Path.Combine(XltrailPath, "repositories");
             static string LogsPath = Path.Combine(XltrailPath, "logs");
-
-            static string Repositories = Path.Combine(XltrailPath, "config", "config.yaml");
+            static readonly ILog logger = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
             private Models.Config.Config Config;
             private Repositories repositories;
-
-            private static readonly ILog logger = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+            private Branch activeWorkbookBranch;
 
             IRibbonUI ribbon;
 
@@ -64,6 +63,11 @@ namespace Xltrail.Client
                 RefreshAll();
             }
 
+            private string GetWorkbookPath(string path)
+            {
+                return path.Substring(StagingPath.Length + 1).Replace("\\", "/");
+            }
+
             private void XlApp_WorkbookAfterSave(Excel.Workbook Wb, bool Success)
             {
                 var path = Wb.FullName;
@@ -71,7 +75,7 @@ namespace Xltrail.Client
                     return;
 
                 //get workbookBranch from workbook path/filename
-                var workbookPath = path.Substring(StagingPath.Length + 1).Replace("\\", "/");
+                var workbookPath = GetWorkbookPath(path);
                 var workbookBranch = repositories.GetWorkbookVersionFromPath(workbookPath);
 
                 //circuit breaker
@@ -84,6 +88,9 @@ namespace Xltrail.Client
 
                 //commit
                 workbookBranch.Commit(path, credentials.Username ?? Environment.UserName, credentials.Email);
+
+                //invalidate ribbon
+                ribbon.Invalidate();
             }
 
             private void ShowNotification(string description)
@@ -133,34 +140,6 @@ namespace Xltrail.Client
                 return deserializer.Deserialize<Models.Config.Config>(yaml);
             }
 
-
-            public Models.Config.Workbooks LoadRepositoriesConfig()
-            {
-                logger.InfoFormat("Load repositores config from {0}", Repositories);
-                var yaml = File.ReadAllText(Repositories);
-                logger.Info(yaml);
-                var deserializer = new DeserializerBuilder()
-                    .WithNamingConvention(new CamelCaseNamingConvention())
-                    .Build();
-                return deserializer.Deserialize<Models.Config.Workbooks>(yaml);
-            }
-
-            /// <summary>
-            /// Synchronise config => list of repositories
-            /// </summary>
-            public void ReadRepositoriesFromFilesystem()
-            {
-                var yaml = File.ReadAllText(Repositories);
-                var deserializer = new DeserializerBuilder()
-                    .WithNamingConvention(new CamelCaseNamingConvention())
-                    .Build();
-                var workbooks = deserializer.Deserialize<Models.Config.Workbooks>(yaml);
-
-                //get list of configured repositories
-                var configuredRepositories = workbooks.Repositories.Select(r => r.Alias);
-                repositories = new Repositories(RepositoriesPath, configuredRepositories);
-            }
-
             public void Ribbon_Load(IRibbonUI ribbon)
             {
                 this.ribbon = ribbon;
@@ -168,6 +147,15 @@ namespace Xltrail.Client
 
             private void XlApp_WorkbookActivate(Excel.Workbook Wb)
             {
+                var path = xlApp.ActiveWorkbook.FullName;
+                if (!path.Contains(StagingPath))
+                {
+                    activeWorkbookBranch = null;
+                }
+                else
+                {
+                    activeWorkbookBranch = repositories.GetWorkbookVersionFromPath(GetWorkbookPath(path));
+                }
                 ribbon.Invalidate();
             }
 
@@ -176,13 +164,16 @@ namespace Xltrail.Client
                 var str = "<customUI onLoad='Ribbon_Load' xmlns='http://schemas.microsoft.com/office/2006/01/customui'>\n";
                 str += "<ribbon>\n";
                 str += "<tabs>\n";
-                str += "<tab id='tab' label='Xltrail'>\n";
+                str += "<tab id='xltrail' label='Xltrail'>\n";
                 str += "<group id='group1' label='Workbooks'>\n";
                 str += "<dynamicMenu id='id-root' label='Workbooks' imageMso='MicrosoftExcel' size='large' getContent='BuildMenu' />\n";
                 str += "</group>";
                 str += "<group id='group2' label='Save' getVisible='GetWorkbookVisibility'>\n";
-                str += "<button id='workbookName' getLabel='GetActiveWorkbookName' size='normal' imageMso='Info' />\n";
-                str += "<button id='commitButton' label='Commit' size='normal' imageMso='FileSave' onAction='CommitButton_Click' />\n";
+                str += "<button id='repositoryName' getLabel='GetRepositoryName' size='normal' imageMso='Info' />\n";
+                str += "<button id='workbookName' getLabel='GetWorkbookName' size='normal' imageMso='Info' />\n";
+                str += "<button id='branchName' getLabel='GetBranchName' size='normal' imageMso='Info' />\n";
+                str += "<button id='discardChangesButton' label='Discard changes' size='normal' imageMso='ReviewRejectChange' getVisible='GetDiscardChangesVisibility' onAction='DiscardChangesButton_Click'/>\n";
+                //str += "<button id='commitButton' label='Commit' size='normal' imageMso='FileSave' onAction='CommitButton_Click' />\n";
                 str += "</group>";
                 str += "</tab>";
                 str += "</tabs>";
@@ -216,9 +207,9 @@ namespace Xltrail.Client
                 ribbon.Invalidate();
                 var workbook = repositories.GetWorkbookFromId(control.Id);
                 var str = "<menu xmlns='http://schemas.microsoft.com/office/2006/01/customui'>\n";
-                foreach (var branch in workbook.Branches.Where(b => b.IsStagingBranch || b.HasConflict))
+                foreach (var branch in workbook.Branches.Where(b => !b.IsStagingBranch))
                 {
-                    str += "<button id='" + branch.Id + "' label='" + branch.DisplayName + "' imageMso='MicrosoftExcel' onAction='OpenWorkbook_Click' />\n";
+                    str += "<button id='" + branch.Id + "' label='" + branch.Description + "' imageMso='MicrosoftExcel' onAction='OpenWorkbook_Click' />\n";
                 }
                 str += "</menu>";
                 return str;
@@ -272,24 +263,64 @@ namespace Xltrail.Client
             }
 
 
-            public string GetActiveWorkbookName(IRibbonControl control)
+            public string GetWorkbookName(IRibbonControl control)
             {
-                var path = xlApp.ActiveWorkbook.FullName;
-                if (!path.Contains(StagingPath))
-                    return "(not a git workbook)";
-                var fileName = Path.GetFileNameWithoutExtension(path);
-                var fileExtension = Path.GetExtension(path);
-                var parts = fileName.Split('_');
-                var branch = parts.Last();
-                return fileName.Substring(0, fileName.Length - branch.Length - 1) + fileExtension + " (" + branch + ")";
+                if (activeWorkbookBranch == null)
+                    return "";
+                return activeWorkbookBranch.Workbook.Path;
+            }
+
+            public string GetRepositoryName(IRibbonControl control)
+            {
+                if (activeWorkbookBranch == null)
+                    return "";
+                return activeWorkbookBranch.Workbook.Repository.Name;
+            }
+
+            public string GetBranchName(IRibbonControl control)
+            {
+                if (activeWorkbookBranch == null)
+                    return "";
+                return activeWorkbookBranch.DisplayName;
             }
 
             public bool GetWorkbookVisibility(IRibbonControl control)
             {
-                var path = xlApp.ActiveWorkbook.FullName;
-                if (!path.Contains(StagingPath))
+                if (activeWorkbookBranch == null)
                     return false;
                 return true;
+            }
+
+            public bool GetDiscardChangesVisibility(IRibbonControl control)
+            {
+                if (activeWorkbookBranch == null)
+                    return false;
+                return activeWorkbookBranch.HasConflict;
+            }
+
+
+            public void DiscardChangesButton_Click(IRibbonControl control)
+            {
+                if (activeWorkbookBranch == null)
+                    return;
+
+                var workbookPath = xlApp.ActiveWorkbook.FullName;
+
+                //get `other branch`
+                var branch = activeWorkbookBranch.OtherBranch;
+
+                //delete branch and close working copy
+                activeWorkbookBranch.Discard();
+                xlApp.ActiveWorkbook.Close(false);
+
+                //delete working copy
+                File.Delete(workbookPath);
+
+                //re-checkout and re-open
+                var stagingBranch = branch.Checkout();
+                workbookPath = OpenWorkbook(stagingBranch);
+                xlApp.Workbooks.Open(workbookPath);
+                ribbon.ActivateTab("xltrail");
             }
 
             public void Refresh_Click(IRibbonControl control)
@@ -337,9 +368,11 @@ namespace Xltrail.Client
                 try
                 {
                     xlApp.Cursor = Excel.XlMousePointer.xlWait;
-                    var workbookVersion = repositories.GetWorkbookVersionFromId(control.Id);
-                    var workbookPath = OpenWorkbook(workbookVersion);
-                    if (!workbookVersion.IsStagingBranch)
+                    var workbookBranch = repositories.GetWorkbookVersionFromId(control.Id);
+                    var stagingBranch = workbookBranch.Checkout();
+
+                    var workbookPath = OpenWorkbook(stagingBranch);
+                    if (!stagingBranch.IsStagingBranch)
                     {
                         xlApp.Workbooks.Open(workbookPath, false, true);
                     }
@@ -347,6 +380,7 @@ namespace Xltrail.Client
                     {
                         xlApp.Workbooks.Open(workbookPath);
                     }
+                    ribbon.ActivateTab("xltrail");
                 }
                 catch (Exception ex)
                 {
@@ -375,16 +409,6 @@ namespace Xltrail.Client
                     var workbook = branch.Workbook;
                     //var branch = menuItem.Workbook.Branches.First();
 
-                    //get workbook's latest commit sha
-                    var head = branch.Head;
-
-                    //branch could be "branch" or "origin/branch"
-                    /*
-                    var branches = repository.GitRepository.Branches.Select(b => b.FriendlyName).ToList();
-                    if (!branches.Contains(branch))
-                        branch = "origin/" + branch;
-                    */
-
                     //get blob and write to filesystem
                     var treeEntry = repository.GitRepository.Branches[branch.Name][workbook.Path];
                     var blob = (LibGit2Sharp.Blob)treeEntry.Target;
@@ -400,6 +424,7 @@ namespace Xltrail.Client
 
             public void CommitAndPushWorkbook(Excel.Workbook workbook)
             {
+                /*
                 //refresh repository definitions
                 var config = LoadRepositoriesConfig();
 
@@ -471,44 +496,39 @@ namespace Xltrail.Client
                             });
                 }
                 gitRepository.Network.Push(gitRepository.Branches[branchName], pushOptions);
+                */
             }
 
 
             public void RefreshAll()
             {
-                try
-                {
-                    logger.Info("Refresh config from remote");
-                    if (Config.Repositories != null)
-                    {
-                        logger.InfoFormat("Update config from {0}", Config.Repositories);
-                        GitProvider.PullFromRemote(
-                            Config.Repositories,
-                            WorkbooksPath,
-                            Config.Credentials.Where(c => Config.Repositories.StartsWith(c.Url)).FirstOrDefault());
-                    }
-                    else
-                    {
-                        logger.Info("No Git remote repository defined for workbooks config");
-                    }
+                //pull config yaml from remote
+                ConfigProvider.PullConfigFromRemote(
+                    Config.Repositories,
+                    Path.GetDirectoryName(ConfigPathRepositories),
+                    Config.Credentials.Where(c => Config.Repositories.StartsWith(c.Url)).FirstOrDefault());
 
-                    var repositoriesConfig = LoadRepositoriesConfig();
-                    foreach (var repository in repositoriesConfig.Repositories)
-                    {
-                        var repositoryPath = Path.Combine(RepositoriesPath, repository.Alias);
-                        var credentials = Config.Credentials.Where(c => repository.Url.StartsWith(c.Url)).FirstOrDefault();
-                        GitProvider.PullFromRemote(repository.Url, repositoryPath, credentials);
-                        GitProvider.EnsureStagingBranches(repositoryPath);
-                    }
+                //load defined repositories from yaml file
+                var repositoryConfigs = ConfigProvider.LoadRepositoryConfigsFromFile(ConfigPathRepositories);
 
-                    ReadRepositoriesFromFilesystem();
-                }
-                catch(Exception ex)
+                //pull repositories
+                foreach(var repositoryConfig in repositoryConfigs)
                 {
-                    logger.Error(ex);
+                    try
+                    {
+                        var repositoryPath = Path.Combine(RepositoriesPath, repositoryConfig.Alias);
+                        var credentials = Config.Credentials.Where(c => repositoryConfig.Url.StartsWith(c.Url)).FirstOrDefault();
+                        GitProvider.PullFromRemote(repositoryConfig.Url, repositoryPath, credentials);
+                    }
+                    catch(Exception ex)
+                    {
+                        logger.WarnFormat(ex.Message);
+                    }
                 }
+
+                //load from file system
+                repositories = ConfigProvider.LoadRepositoriesFromFilesystem(RepositoriesPath, repositoryConfigs);
             }
-
 
         }
     }

@@ -16,8 +16,8 @@ namespace Xltrail.Client.Models
 
         public Workbook(Repository repository, string path)
         {
-            Id = "id-" + Convert.ToBase64String(Guid.NewGuid().ToByteArray()).Replace("+", "").Replace("/", "_").Replace(" ", "").Replace("=", "");
             Path = path.Replace("\\", "/");
+            Id = "id-" + Convert.ToBase64String(Guid.NewGuid().ToByteArray()).Replace("+", "").Replace("/", "_").Replace(" ", "").Replace("=", "");
             Folder = System.IO.Path.GetDirectoryName(Path.Replace("/", "\\")).Replace("\\", "/");
             Repository = repository;
             InitialiseBranches();
@@ -26,15 +26,25 @@ namespace Xltrail.Client.Models
         public void InitialiseBranches()
         {
             Branches = new List<Branch>();
-            foreach(var branch in Repository
+            var branches = Repository
                 .GitRepository
                 .Branches
-                .Select(branch => branch.FriendlyName.Replace("origin/", ""))
-                .Where(name => name != "HEAD")
-                .Distinct())
+                .Where(branch => !branch.IsRemote)
+                .Where(branch => branch.FriendlyName != "HEAD")
+                .ToList();
+
+            foreach (var branch in branches)
             {
-                Branches.Add(new Branch(this, branch));
+                //check if workbook exists in current branch
+                var treeEntry = Repository.GitRepository.Branches[branch.FriendlyName][Path];
+                if (treeEntry != null)
+                    Branches.Add(new Branch(this, branch.FriendlyName));
             }
+        }
+
+        public Branch GetBranch(string branchName)
+        {
+            return Branches.Where(branch => branch.Name == branchName).FirstOrDefault();
         }
     }
 }
